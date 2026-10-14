@@ -100,7 +100,8 @@ app.use('/api', (req, res, next) => {
 
 app.use('/api', (req, res, next) => {
   if (!req.user) return next();
-  const isAdminOnlyPath = req.path.startsWith('/settings') ||
+  const isSharedSettingsRead = req.method === 'GET' && req.path === '/settings';
+  const isAdminOnlyPath = (req.path.startsWith('/settings') && !isSharedSettingsRead) ||
     req.path.startsWith('/users') ||
     req.path === '/audit-logs' ||
     req.path === '/auth/change-password';
