@@ -28,6 +28,8 @@ process.on('unhandledRejection', (reason, promise) => {
 const app = express();
 const requestContext = new AsyncLocalStorage();
 const PORT = process.env.PORT || 5000;
+const DB_PATH = path.resolve(process.env.DB_PATH || path.join(__dirname, '..', 'data', 'Fund_vault_v7.sqlite3'));
+const DB_BACKUP_DIR = path.join(path.dirname(DB_PATH), 'backups');
 
 // Enterprise Security Headers (Defense-in-Depth)
 app.use((req, res, next) => {
@@ -39,12 +41,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Hardened CORS: Restrict exclusively to local origins and native desktop callers
+// Keep local development origins and explicitly configured deployment origins.
 const allowedOrigins = [
   'http://localhost:5000',
   'http://127.0.0.1:5000',
   'http://localhost:5173',
-  'http://127.0.0.1:5173'
+  'http://127.0.0.1:5173',
+  ...(process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map(origin => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean)
 ];
 app.use(cors({
   origin: function (origin, callback) {
@@ -64,15 +70,14 @@ app.use((req, res, next) => {
 // Automated SQLite Database Backup Routine on Server Startup
 function backupDatabase() {
   try {
-    const backupDir = path.join(__dirname, '..', 'data', 'backups');
+    const backupDir = DB_BACKUP_DIR;
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir, { recursive: true });
     }
-    const dbPath = path.join(__dirname, '..', 'data', 'Fund_vault_v7.sqlite3');
-    if (fs.existsSync(dbPath)) {
+    if (fs.existsSync(DB_PATH)) {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const backupPath = path.join(backupDir, `Fund_vault_v7_backup_${timestamp}.sqlite3`);
-      fs.copyFileSync(dbPath, backupPath);
+      fs.copyFileSync(DB_PATH, backupPath);
       console.log(`[Backup] Automated database backup created: ${backupPath}`);
       
       // Retain max 10 most recent backups
@@ -5761,7 +5766,7 @@ app.get('/api/audit-logs', (req, res) => {
 // Protect Shield Status API Endpoint
 app.get('/api/shield-status', (req, res) => {
   try {
-    const backupDir = path.join(__dirname, '..', 'data', 'backups');
+    const backupDir = DB_BACKUP_DIR;
     let backupCount = 0;
     if (fs.existsSync(backupDir)) {
       backupCount = fs.readdirSync(backupDir).filter(f => f.endsWith('.sqlite3')).length;

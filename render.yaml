@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: fund-management-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/shield-status
+    disk:
+      name: fund-management-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /var/data/Fund_vault_v7.sqlite3
+      - key: CORS_ORIGINS
+        value: https://fdr360.vercel.app

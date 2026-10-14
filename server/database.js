@@ -2,12 +2,10 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-const dataDir = path.join(__dirname, '..', 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-const dbPath = path.join(dataDir, 'Fund_vault_v7.sqlite3');
+const defaultDataDir = path.join(__dirname, '..', 'data');
+const dbPath = path.resolve(process.env.DB_PATH || path.join(defaultDataDir, 'Fund_vault_v7.sqlite3'));
+const dataDir = path.dirname(dbPath);
+fs.mkdirSync(dataDir, { recursive: true });
 const oldDbPath = path.join(dataDir, 'investments.db');
 
 // If legacy investments.db exists and new Fund_vault_v7.sqlite3 does not, migrate it

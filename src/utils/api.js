@@ -1,4 +1,5 @@
-const API_BASE = '/api';
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim().replace(/\/+$/, '');
+const API_BASE = configuredApiUrl ? `${configuredApiUrl}/api` : '/api';
 
 export function getAuthToken() {
   return sessionStorage.getItem('authToken') || localStorage.getItem('authToken') || '';
