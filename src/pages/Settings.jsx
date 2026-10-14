@@ -23,13 +23,15 @@ import {
   Bell,
   Volume2,
   Smartphone,
-  RefreshCw
+  RefreshCw,
+  Users,
+  UserPlus
 } from 'lucide-react';
 import Modal from '../components/Modal';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import { api } from '../utils/api';
 
-export default function Settings({ showToast, onRefreshStats }) {
+export default function Settings({ showToast, onRefreshStats, role }) {
   const [isAuthenticated, setIsAuthenticated] = useState(true);
   const [passwordInput, setPasswordInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -84,6 +86,10 @@ export default function Settings({ showToast, onRefreshStats }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [users, setUsers] = useState([]);
+  const [userEdits, setUserEdits] = useState({});
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'viewer' });
+  const [usersLoading, setUsersLoading] = useState(false);
 
   // Banks List for email directory status
   const [banksList, setBanksList] = useState([]);
@@ -120,7 +126,52 @@ export default function Settings({ showToast, onRefreshStats }) {
     loadFundCategories();
     loadCOA();
     loadBanks();
+    if (role === 'admin') loadUsers();
   }, []);
+
+  const loadUsers = async () => {
+    try {
+      setUsersLoading(true);
+      const loadedUsers = await api.getUsers();
+      setUsers(loadedUsers);
+      setUserEdits(Object.fromEntries(loadedUsers.map(user => [user.id, {
+        role: user.role,
+        active: Boolean(user.active),
+        password: ''
+      }])));
+    } catch (err) {
+      showToast('Failed to load user accounts: ' + err.message, 'error');
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    try {
+      await api.createUser(newUser);
+      showToast(`User "${newUser.username}" created successfully.`, 'success');
+      setNewUser({ username: '', password: '', role: 'viewer' });
+      await loadUsers();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+
+  const handleSaveUser = async (user) => {
+    try {
+      const edits = userEdits[user.id];
+      await api.updateUser(user.id, {
+        role: edits.role,
+        active: edits.active,
+        ...(edits.password ? { password: edits.password } : {})
+      });
+      showToast(`Access for "${user.username}" updated.`, 'success');
+      await loadUsers();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
 
   const loadBanks = async () => {
     try {
@@ -376,15 +427,6 @@ export default function Settings({ showToast, onRefreshStats }) {
       setLoading(true);
       
       const payloadSettings = { ...settings };
-      if (newPassword) {
-        if (newPassword !== confirmPassword) {
-          showToast('New passwords do not match', 'error');
-          setLoading(false);
-          return;
-        }
-        payloadSettings.system_password = newPassword;
-      }
-
       await api.updateSettings({
         settings: payloadSettings,
         current_password: passwordInput
@@ -392,11 +434,29 @@ export default function Settings({ showToast, onRefreshStats }) {
 
       showToast('System signatories, PBS logo & organization settings saved to database!', 'success');
       if (onRefreshStats) onRefreshStats();
-      if (newPassword) {
-        setPasswordInput(newPassword);
-        setNewPassword('');
-        setConfirmPassword('');
-      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleChangeAdminPassword = async () => {
+    if (newPassword.length < 12) {
+      showToast('Admin passwords must be at least 12 characters.', 'error');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showToast('New passwords do not match.', 'error');
+      return;
+    }
+    try {
+      setLoading(true);
+      await api.changeAdminPassword(currentPassword, newPassword);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      showToast('Administrator password changed successfully.', 'success');
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -578,6 +638,85 @@ export default function Settings({ showToast, onRefreshStats }) {
           </div>
         </div>
       </div>
+
+      {role === 'admin' && (
+        <section className="glass-panel" style={{ padding: '24px' }}>
+          <h4 style={{ fontSize: '16px', fontWeight: '800', color: '#60a5fa', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Users size={19} />
+            <span>User Accounts & Access Control</span>
+          </h4>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '18px' }}>
+            Only Admins can access System Setup and activity logs. All non-admin accounts can create, edit, and delete operational records.
+          </p>
+
+          <form onSubmit={handleCreateUser} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 160px auto', gap: '10px', alignItems: 'end', marginBottom: '20px' }}>
+            <div className="form-group">
+              <label className="form-label">Username</label>
+              <input className="form-input" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} minLength={3} maxLength={32} pattern="[a-zA-Z0-9._-]+" required />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Initial password (12+ characters)</label>
+              <input className="form-input" type="password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} minLength={12} autoComplete="new-password" required />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Role</label>
+              <select className="form-input" value={newUser.role} onChange={e => setNewUser({ ...newUser, role: e.target.value })}>
+                <option value="admin">Admin</option>
+                <option value="editor">Editor</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </div>
+            <button className="btn-primary" type="submit" disabled={usersLoading} style={{ justifyContent: 'center', height: '42px' }}>
+              <UserPlus size={16} /> Add user
+            </button>
+          </form>
+
+          {usersLoading ? <p>Loading users...</p> : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <thead>
+                  <tr>
+                    <th style={{ padding: '10px' }}>Username</th>
+                    <th style={{ padding: '10px' }}>Role</th>
+                    <th style={{ padding: '10px' }}>Status</th>
+                    <th style={{ padding: '10px' }}>Set new password</th>
+                    <th style={{ padding: '10px' }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map(user => {
+                    const edit = userEdits[user.id] || { role: user.role, active: Boolean(user.active), password: '' };
+                    return (
+                      <tr key={user.id} style={{ borderTop: '1px solid var(--border-color)' }}>
+                        <td style={{ padding: '10px', fontWeight: 700 }}>{user.username}</td>
+                        <td style={{ padding: '10px' }}>
+                          <select className="form-input" value={edit.role} onChange={e => setUserEdits(prev => ({ ...prev, [user.id]: { ...edit, role: e.target.value } }))}>
+                            <option value="admin">Admin</option>
+                            <option value="editor">Editor</option>
+                            <option value="viewer">Viewer</option>
+                          </select>
+                        </td>
+                        <td style={{ padding: '10px' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                            <input type="checkbox" checked={edit.active} onChange={e => setUserEdits(prev => ({ ...prev, [user.id]: { ...edit, active: e.target.checked } }))} />
+                            Active
+                          </label>
+                        </td>
+                        <td style={{ padding: '10px' }}>
+                          <input className="form-input" type="password" placeholder="Leave blank to keep" value={edit.password} minLength={12} autoComplete="new-password" onChange={e => setUserEdits(prev => ({ ...prev, [user.id]: { ...edit, password: e.target.value } }))} />
+                        </td>
+                        <td style={{ padding: '10px' }}>
+                          <button className="btn-secondary" type="button" onClick={() => handleSaveUser(user)} disabled={usersLoading}>Save</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* SETTINGS EDIT FORM */}
       <form onSubmit={handleSaveSettings} style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -1677,13 +1816,25 @@ export default function Settings({ showToast, onRefreshStats }) {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
               <div className="form-group">
+                <label className="form-label">Current Admin Password</label>
+                <input
+                  type="password"
+                  className="form-input"
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </div>
+              <div className="form-group">
                 <label className="form-label">New Admin Password</label>
                 <input
                   type="password"
                   className="form-input"
-                  placeholder="Leave blank to keep current"
+                  placeholder="At least 12 characters"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
+                  minLength={12}
+                  autoComplete="new-password"
                 />
               </div>
 
@@ -1695,9 +1846,15 @@ export default function Settings({ showToast, onRefreshStats }) {
                   placeholder="Confirm new password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
+                  minLength={12}
+                  autoComplete="new-password"
                 />
               </div>
             </div>
+            <button type="button" className="btn-primary" onClick={handleChangeAdminPassword} disabled={loading} style={{ marginTop: '16px' }}>
+              <Lock size={16} />
+              <span>{loading ? 'Updating...' : 'Change Admin Password'}</span>
+            </button>
           </div>
 
           {/* SAVE BUTTON */}

@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const nodemailer = require('nodemailer');
+const { AsyncLocalStorage } = require('async_hooks');
 const db = require('./database');
 const {
   hashPassword,
@@ -13,6 +14,7 @@ const {
   checkRateLimit,
   recordFailedLogin,
   clearFailedLogins,
+  revokeSessionsForUser,
   requireAuth
 } = require('./auth');
 
@@ -24,6 +26,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 const app = express();
+const requestContext = new AsyncLocalStorage();
 const PORT = process.env.PORT || 5000;
 
 // Enterprise Security Headers (Defense-in-Depth)
@@ -54,6 +57,9 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+  requestContext.run({ req, auditEvents: 0 }, next);
+});
 
 // Automated SQLite Database Backup Routine on Server Startup
 function backupDatabase() {
@@ -92,13 +98,46 @@ app.use('/api', (req, res, next) => {
   return requireAuth(req, res, next);
 });
 
+app.use('/api', (req, res, next) => {
+  if (!req.user) return next();
+  const isAdminOnlyPath = req.path.startsWith('/settings') ||
+    req.path.startsWith('/users') ||
+    req.path === '/audit-logs' ||
+    req.path === '/auth/change-password';
+  if (req.user.role !== 'admin' && isAdminOnlyPath) {
+    logAudit('ACCESS_DENIED', 'api', null, `Denied ${req.method} ${req.path}`, req.user.userid);
+    return res.status(403).json({ error: 'Administrator access is required.' });
+  }
+  next();
+});
+
+app.use('/api', (req, res, next) => {
+  if (!req.user) return next();
+  const context = requestContext.getStore();
+  res.once('finish', () => {
+    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if (isWrite && res.statusCode >= 200 && res.statusCode < 300 && context?.auditEvents === 0) {
+      logAudit('API_WRITE', 'api', null, `Completed ${req.method} ${req.path}`, req.user.userid);
+    }
+  });
+  next();
+});
+
 // Helper for audit logs
-function logAudit(action, entity, entityId, details, performedBy = 'System User') {
+function logAudit(action, entity, entityId, details, performedBy) {
   try {
     db.prepare(`
       INSERT INTO audit_logs (action, entity, entity_id, details, performed_by)
       VALUES (?, ?, ?, ?, ?)
-    `).run(action, entity, entityId || null, details, performedBy);
+    `).run(
+      action,
+      entity,
+      entityId || null,
+      details,
+      performedBy || requestContext.getStore()?.req?.user?.userid || 'System User'
+    );
+    const context = requestContext.getStore();
+    if (context) context.auditEvents++;
   } catch (err) {
     console.error('Audit Log Error:', err);
   }
@@ -2882,11 +2921,99 @@ app.get('/api/settings', (req, res) => {
   }
 });
 
+app.get('/api/users', (req, res) => {
+  const users = db.prepare(`
+    SELECT id, username, role, active, created_at
+    FROM app_users
+    ORDER BY username COLLATE NOCASE
+  `).all();
+  res.json(users);
+});
+
+app.post('/api/users', (req, res) => {
+  try {
+    const username = String(req.body?.username || '').trim();
+    const password = String(req.body?.password || '');
+    const role = String(req.body?.role || '');
+    if (!/^[a-zA-Z0-9._-]{3,32}$/.test(username)) {
+      return res.status(400).json({ error: 'Username must be 3–32 characters using letters, numbers, dots, underscores, or hyphens.' });
+    }
+    if (password.length < 12) {
+      return res.status(400).json({ error: 'New user passwords must be at least 12 characters.' });
+    }
+    if (!['admin', 'editor', 'viewer'].includes(role)) {
+      return res.status(400).json({ error: 'Choose Admin, Editor, or Viewer access.' });
+    }
+    const result = db.prepare(`
+      INSERT INTO app_users (username, password_hash, role)
+      VALUES (?, ?, ?)
+    `).run(username, hashPassword(password), role);
+    logAudit('CREATE', 'user', result.lastInsertRowid, `Created ${role} account '${username}'`, req.user.userid);
+    res.status(201).json({ id: result.lastInsertRowid, username, role, active: 1 });
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: 'That username is already in use.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/users/:id', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const user = db.prepare('SELECT id, username, role, active FROM app_users WHERE id = ?').get(id);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    const role = req.body?.role === undefined ? user.role : String(req.body.role);
+    const requestedActive = req.body?.active;
+    const active = requestedActive === undefined
+      ? user.active
+      : [true, 1, '1'].includes(requestedActive)
+        ? 1
+        : [false, 0, '0'].includes(requestedActive)
+          ? 0
+          : null;
+    const password = req.body?.password === undefined ? '' : String(req.body.password);
+    if (!['admin', 'editor', 'viewer'].includes(role)) {
+      return res.status(400).json({ error: 'Choose Admin, Editor, or Viewer access.' });
+    }
+    if (![0, 1].includes(active)) {
+      return res.status(400).json({ error: 'User status must be active or disabled.' });
+    }
+    if (password && password.length < 12) {
+      return res.status(400).json({ error: 'Passwords must be at least 12 characters.' });
+    }
+    if (req.user.userid === user.username && (role !== 'admin' || !active)) {
+      return res.status(400).json({ error: 'You cannot remove administrator access from or disable your own account.' });
+    }
+    if (user.role === 'admin' && user.active && (role !== 'admin' || !active)) {
+      const activeAdmins = db.prepare("SELECT COUNT(*) AS count FROM app_users WHERE role = 'admin' AND active = 1").get().count;
+      if (activeAdmins <= 1) {
+        return res.status(400).json({ error: 'At least one active administrator must remain.' });
+      }
+    }
+
+    db.prepare(`
+      UPDATE app_users
+      SET role = ?, active = ?, password_hash = CASE WHEN ? = '' THEN password_hash ELSE ? END
+      WHERE id = ?
+    `).run(role, active, password, password ? hashPassword(password) : '', id);
+    if (role !== user.role || active !== user.active || password) {
+      revokeSessionsForUser(user.username);
+    }
+    logAudit('UPDATE', 'user', id, `Updated account '${user.username}' (role: ${role}, active: ${active})`, req.user.userid);
+    res.json({ id, username: user.username, role, active });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/auth/login', (req, res) => {
   try {
     const ip = req.ip || req.connection.remoteAddress || '127.0.0.1';
     const rateCheck = checkRateLimit(ip);
     if (!rateCheck.allowed) {
+      logAudit('LOGIN_BLOCKED', 'system', null, `Login blocked for '${String(req.body?.userid || '').trim()}'`);
       return res.status(429).json({
         success: false,
         error: `Too many failed login attempts. Please wait ${rateCheck.remainingSeconds} seconds before trying again.`
@@ -2906,8 +3033,8 @@ app.post('/api/auth/login', (req, res) => {
     const smtpEmailRow = db.prepare("SELECT value FROM system_settings WHERE key = 'smtp_sender_email'").get();
 
     const storedUser = (storedUserRow ? storedUserRow.value : 'arif').toString().trim();
-    const storedLoginPwd = storedLoginPwdRow ? storedLoginPwdRow.value : '';
     const storedAdminPwd = storedAdminPwdRow ? storedAdminPwdRow.value : '';
+    const storedLoginPwd = storedLoginPwdRow ? storedLoginPwdRow.value : '';
     const alertEmail = (alertEmailRow ? alertEmailRow.value : '').toString().trim();
     const smtpEmail = (smtpEmailRow ? smtpEmailRow.value : '').toString().trim();
 
@@ -2915,40 +3042,39 @@ app.post('/api/auth/login', (req, res) => {
     if (!submittedUser) {
       if (verifyPassword(password, storedAdminPwd)) {
         clearFailedLogins(ip);
-        const token = createSession('admin');
+        const token = createSession('admin', 'admin');
         logAudit('LOGIN', 'system', 0, 'Admin authenticated for settings access');
-        return res.json({ success: true, token, message: 'Authentication successful' });
+        return res.json({ success: true, token, userid: 'admin', role: 'admin', message: 'Authentication successful' });
       } else {
         recordFailedLogin(ip);
+        logAudit('LOGIN_FAILED', 'system', null, 'Failed administrator settings login', 'admin');
         return res.status(401).json({ success: false, error: 'Invalid admin password' });
       }
     }
 
-    // Main App Login: Check User ID, Admin username, or registered email
     const normInput = submittedUser.toLowerCase();
-    const isUserMatch = normInput === storedUser.toLowerCase() ||
-                        normInput === 'admin' ||
-                        (alertEmail && normInput === alertEmail.toLowerCase()) ||
-                        (smtpEmail && normInput === smtpEmail.toLowerCase());
+    const account = db.prepare('SELECT id, username, password_hash, role, active FROM app_users WHERE username = ? COLLATE NOCASE').get(submittedUser);
+    const adminAlias = normInput === 'admin' && verifyPassword(password, storedAdminPwd);
+    const legacyEmailAlias = !account &&
+      (alertEmail && normInput === alertEmail.toLowerCase() || smtpEmail && normInput === smtpEmail.toLowerCase()) &&
+      (verifyPassword(password, storedLoginPwd) || verifyPassword(password, storedAdminPwd));
 
-    const isPassValid = verifyPassword(password, storedLoginPwd) ||
-                        verifyPassword(password, storedAdminPwd) ||
-                        (password === '123456' && verifyPassword('a123456', storedLoginPwd)) ||
-                        (password === 'a123456' && verifyPassword('123456', storedLoginPwd));
-
-    if (isUserMatch && isPassValid) {
+    if (adminAlias || legacyEmailAlias || account?.active && verifyPassword(password, account.password_hash)) {
       clearFailedLogins(ip);
-      const sessionUser = normInput === 'admin' ? 'admin' : storedUser;
-      const token = createSession(sessionUser);
-      logAudit('LOGIN', 'system', 0, `User '${sessionUser}' logged in`);
+      const sessionUser = adminAlias ? 'admin' : legacyEmailAlias ? storedUser : account.username;
+      const role = adminAlias || legacyEmailAlias ? 'admin' : account.role;
+      const token = createSession(sessionUser, role);
+      logAudit('LOGIN', 'system', 0, `User '${sessionUser}' logged in`, sessionUser);
       return res.json({
         success: true,
         token,
         userid: sessionUser,
+        role,
         message: 'Authentication successful'
       });
     } else {
       recordFailedLogin(ip);
+      logAudit('LOGIN_FAILED', 'system', null, `Failed login for '${submittedUser}'`, submittedUser || 'Unknown user');
       return res.status(401).json({
         success: false,
         error: 'Invalid User ID or Password. Please check your credentials.'
@@ -2959,18 +3085,27 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
+app.post('/api/auth/logout', (req, res) => {
+  logAudit('LOGOUT', 'system', null, `User '${req.user.userid}' logged out`, req.user.userid);
+  revokeSession(req.headers.authorization.slice('Bearer '.length));
+  res.json({ success: true });
+});
+
 app.post('/api/settings', (req, res) => {
   try {
     const body = req.body || {};
     const settingsObj = (body.settings && typeof body.settings === 'object') ? body.settings : body;
     const current_password = body.current_password;
 
-    // Verify admin password before allowing settings modification
-    const storedAdminPwdRow = db.prepare("SELECT value FROM system_settings WHERE key = 'system_password'").get();
-    const storedAdminPwd = storedAdminPwdRow ? storedAdminPwdRow.value : '';
-
-    if (current_password && !verifyPassword(current_password, storedAdminPwd)) {
-      return res.status(401).json({ error: 'Incorrect current admin password authorization' });
+    if (current_password) {
+      const storedAdminPwdRow = db.prepare("SELECT value FROM system_settings WHERE key = 'system_password'").get();
+      const storedAdminPwd = storedAdminPwdRow ? storedAdminPwdRow.value : '';
+      if (!verifyPassword(current_password, storedAdminPwd)) {
+        return res.status(401).json({ error: 'Incorrect current admin password authorization' });
+      }
+    }
+    if (Object.hasOwn(settingsObj, 'system_password') || Object.hasOwn(settingsObj, 'system_login_password')) {
+      return res.status(400).json({ error: 'Use the Change Admin Password form to update credentials.' });
     }
 
     const upsertStmt = db.prepare(`
@@ -2983,29 +3118,57 @@ app.post('/api/settings', (req, res) => {
         Object.keys(settingsObj).forEach(key => {
           if (key !== 'current_password' && key !== 'settings') {
             let val = settingsObj[key];
-            
-            // Hash passwords securely using scrypt if updated
-            if (key === 'system_password' || key === 'system_login_password') {
-              if (val && String(val).trim()) {
-                val = hashPassword(String(val).trim());
-              } else {
-                return; // Skip empty password fields
-              }
-            }
-
-            // Preserve existing smtp_app_password if empty string passed
-            if (key === 'smtp_app_password' && (!val || String(val).trim() === '')) {
-              return;
-            }
-
+            if (key === 'smtp_app_password' && (!val || String(val).trim() === '')) return;
             upsertStmt.run(key, val !== undefined && val !== null ? String(val) : '');
           }
         });
       }
     })();
 
-    logAudit('UPDATE', 'settings', 0, 'Updated system settings', req.user ? req.user.userid : 'System Admin');
+    logAudit('UPDATE', 'settings', 0, 'Updated system settings', req.user.userid);
     res.json({ message: 'Settings saved successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/change-password', (req, res) => {
+  try {
+    const currentPassword = String(req.body?.current_password || '');
+    const newPassword = String(req.body?.new_password || '');
+    if (newPassword.length < 12) {
+      return res.status(400).json({ error: 'Admin passwords must be at least 12 characters.' });
+    }
+    const user = db.prepare('SELECT username, password_hash, role FROM app_users WHERE username = ? COLLATE NOCASE').get(req.user.userid);
+    const storedAdminPassword = db.prepare("SELECT value FROM system_settings WHERE key = 'system_password'").get()?.value || '';
+    const currentPasswordValid = user
+      ? verifyPassword(currentPassword, user.password_hash)
+      : verifyPassword(currentPassword, storedAdminPassword);
+    if (!currentPasswordValid) {
+      return res.status(401).json({ error: 'Incorrect current admin password authorization' });
+    }
+
+    const upsertStmt = db.prepare(`
+      INSERT INTO system_settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `);
+    const newHash = hashPassword(newPassword);
+    db.transaction(() => {
+      if (user) {
+        db.prepare('UPDATE app_users SET password_hash = ? WHERE username = ? COLLATE NOCASE').run(newHash, user.username);
+      }
+      const primaryUser = db.prepare("SELECT value FROM system_settings WHERE key = 'system_userid'").get()?.value;
+      if (req.user.userid === 'admin' || req.user.userid.toLowerCase() === String(primaryUser || '').toLowerCase()) {
+        upsertStmt.run('system_password', newHash);
+        upsertStmt.run('system_login_password', newHash);
+        if (!user && primaryUser) {
+          db.prepare('UPDATE app_users SET password_hash = ? WHERE username = ? COLLATE NOCASE').run(newHash, primaryUser);
+        }
+      }
+    })();
+
+    logAudit('UPDATE', 'user', user?.username || 'admin', 'Changed administrator password', req.user.userid);
+    res.json({ message: 'Administrator password changed successfully.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -5587,7 +5750,7 @@ app.post('/api/settings/factory-reset', (req, res) => {
 });
 app.get('/api/audit-logs', (req, res) => {
   try {
-    const logs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200').all();
+    const logs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC').all();
     res.json(logs);
   } catch (err) {
     res.status(500).json({ error: err.message });

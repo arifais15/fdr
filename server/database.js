@@ -399,6 +399,23 @@ function seedInitialData() {
     upsertSetting.run('system_password', hashPassword(adminPwdRow.value));
   }
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'editor', 'viewer')),
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const initialUserId = db.prepare("SELECT value FROM system_settings WHERE key = 'system_userid'").get().value;
+  const initialUserPassword = db.prepare("SELECT value FROM system_settings WHERE key = 'system_login_password'").get().value;
+  db.prepare(`
+    INSERT OR IGNORE INTO app_users (username, password_hash, role)
+    VALUES (?, ?, 'admin')
+  `).run(initialUserId, initialUserPassword);
+
   const settingsCount = db.prepare('SELECT COUNT(*) as count FROM system_settings').get().count;
   if (settingsCount <= 3) {
     upsertSetting.run('org_name', 'Gazipur Palli Bidyut Samity-2');

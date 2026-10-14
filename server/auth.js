@@ -55,11 +55,12 @@ function isHashed(storedValue) {
 /**
  * Create a new session token for user.
  */
-function createSession(userid) {
+function createSession(userid, role = 'admin') {
   const token = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
   sessions.set(token, {
     userid,
+    role,
     createdAt: now,
     expiresAt: now + SESSION_EXPIRY_MS
   });
@@ -85,6 +86,12 @@ function validateSession(token) {
  */
 function revokeSession(token) {
   if (token) sessions.delete(token);
+}
+
+function revokeSessionsForUser(userid) {
+  for (const [token, session] of sessions) {
+    if (session.userid === userid) sessions.delete(token);
+  }
 }
 
 /**
@@ -143,6 +150,7 @@ module.exports = {
   createSession,
   validateSession,
   revokeSession,
+  revokeSessionsForUser,
   checkRateLimit,
   recordFailedLogin,
   clearFailedLogins,

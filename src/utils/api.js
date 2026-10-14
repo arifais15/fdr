@@ -157,6 +157,14 @@ export const api = {
   getSettings: () => fetchJSON('/settings'),
   updateSettings: (data) => fetchJSON('/settings', { method: 'POST', body: JSON.stringify(data) }),
   login: (userid, password) => fetchJSON('/auth/login', { method: 'POST', body: JSON.stringify({ userid, password }) }),
+  changeAdminPassword: (currentPassword, newPassword) => fetchJSON('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+  }),
+  logout: () => fetchJSON('/auth/logout', { method: 'POST' }),
+  getUsers: () => fetchJSON('/users'),
+  createUser: (data) => fetchJSON('/users', { method: 'POST', body: JSON.stringify(data) }),
+  updateUser: (id, data) => fetchJSON(`/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   sendTestEmail: (data) => fetchJSON('/settings/send-test-email', { method: 'POST', body: JSON.stringify(data) }),
   sendTestTelegram: (data) => fetchJSON('/settings/send-test-telegram', { method: 'POST', body: JSON.stringify(data) }),
   checkNotificationsNow: () => fetchJSON('/notifications/check-now', { method: 'POST' }),

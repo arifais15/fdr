@@ -28,7 +28,7 @@ import {
 
 import { getTranslation } from '../utils/translations';
 
-export default function Sidebar({ activeTab, navData, setActiveTab, onLogout, isCollapsed, onToggleCollapse, lang = 'en' }) {
+export default function Sidebar({ activeTab, navData, setActiveTab, onLogout, isCollapsed, onToggleCollapse, lang = 'en', role }) {
   const t = (key) => getTranslation(lang, key);
 
   const [isReportsExpanded, setIsReportsExpanded] = useState(() => {
@@ -134,7 +134,7 @@ export default function Sidebar({ activeTab, navData, setActiveTab, onLogout, is
     { id: 'settings', label: t('nav_settings'), icon: Settings },
     { id: 'manual', label: t('nav_manual'), icon: HelpCircle },
     { id: 'audit', label: t('nav_audit'), icon: ShieldAlert }
-  ];
+  ].filter(item => !['settings', 'audit'].includes(item.id) || role === 'admin');
 
   return (
     <>

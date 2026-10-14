@@ -71,6 +71,10 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(() => {
     return sessionStorage.getItem('isLoggedIn') === 'true';
   });
+  const [currentUser, setCurrentUser] = useState(() => ({
+    userid: sessionStorage.getItem('authUserid') || '',
+    role: sessionStorage.getItem('authRole') || ''
+  }));
   const [loginUserid, setLoginUserid] = useState(() => {
     return localStorage.getItem('loginUserid') || 'arif';
   });
@@ -89,6 +93,9 @@ export default function App() {
     const handleUnauthorized = () => {
       setIsLoggedIn(false);
       sessionStorage.removeItem('isLoggedIn');
+      sessionStorage.removeItem('authUserid');
+      sessionStorage.removeItem('authRole');
+      setCurrentUser({ userid: '', role: '' });
       setAuthToken('');
       showToast('Session expired or unauthorized. Please log in.', 'error');
     };
@@ -126,9 +133,15 @@ export default function App() {
   }, [isLoggedIn]);
 
   const handleLogout = () => {
+    if (sessionStorage.getItem('authToken')) {
+      api.logout().catch(err => console.error('Failed to record logout:', err));
+    }
     setAuthToken('');
     setIsLoggedIn(false);
     sessionStorage.removeItem('isLoggedIn');
+    sessionStorage.removeItem('authUserid');
+    sessionStorage.removeItem('authRole');
+    setCurrentUser({ userid: '', role: '' });
     setLoginPassword('');
   };
 
@@ -160,7 +173,11 @@ export default function App() {
       if (res.success && res.token) {
         setAuthToken(res.token);
         setIsLoggedIn(true);
+        const user = { userid: res.userid || loginUserid, role: res.role || 'viewer' };
+        setCurrentUser(user);
         sessionStorage.setItem('isLoggedIn', 'true');
+        sessionStorage.setItem('authUserid', user.userid);
+        sessionStorage.setItem('authRole', user.role);
         localStorage.setItem('loginUserid', loginUserid);
         showToast('Login successful! Welcome to PBS-2 Fund Vault.', 'success');
       }
@@ -215,6 +232,7 @@ export default function App() {
     <div className="app-container">
       <Sidebar 
         activeTab={activeTab}
+        role={currentUser.role}
         navData={navData} 
         setActiveTab={(tab, extraData) => handleNavigate(tab, extraData)} 
         onLogout={handleLogout}
@@ -291,14 +309,14 @@ export default function App() {
         )}
 
         {activeTab === 'settings' && (
-          <Settings showToast={showToast} onRefreshStats={loadDashboardStats} />
+          <Settings showToast={showToast} onRefreshStats={loadDashboardStats} role={currentUser.role} />
         )}
 
         {activeTab === 'manual' && (
           <UserManual />
         )}
 
-        {activeTab === 'audit' && (
+        {activeTab === 'audit' && currentUser.role === 'admin' && (
           <AuditLogs showToast={showToast} />
         )}
 
