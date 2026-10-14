@@ -5790,6 +5790,13 @@ app.get('/api/shield-status', (req, res) => {
   }
 });
 
+app.use((err, req, res, next) => {
+  if (err.message === 'Blocked by CORS security policy') {
+    return res.status(403).json({ error: 'This website is not allowed to access the API. Check CORS_ORIGINS.' });
+  }
+  next(err);
+});
+
 // Serve Vite frontend in production if built
 const buildPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(buildPath));
