@@ -7,7 +7,8 @@
     "start": "node server/server.js",
     "dev": "concurrently \"nodemon server/server.js\" \"vite\"",
     "build": "vite build",
-    "build:portable": "node make-portable.js"
+    "build:portable": "node make-portable.js",
+    "build:exe": "node make-single-exe.js"
   },
   "keywords": [],
   "author": "",
