@@ -53,16 +53,30 @@ function copyRecursiveSync(src, dest) {
       copyRecursiveSync(path.join(src, childItemName), path.join(dest, childItemName));
     });
   } else if (exists) {
-    fs.copyFileSync(src, dest);
+    try {
+      fs.copyFileSync(src, dest);
+    } catch (copyErr) {
+      // If destination already exists and is locked, keep existing
+      if (!fs.existsSync(dest)) {
+        console.warn(`       Could not copy ${path.basename(src)}: ${copyErr.message}`);
+      }
+    }
   }
 }
 
 // 3. Copy Node.exe runtime
 console.log('[3/10] Embedding Node.exe runtime...');
 const nodeExec = process.execPath;
-if (fs.existsSync(nodeExec)) {
-  fs.copyFileSync(nodeExec, path.join(outputDir, 'node.exe'));
-  console.log(`       Embedded node.exe from ${nodeExec}`);
+const targetNode = path.join(outputDir, 'node.exe');
+if (fs.existsSync(targetNode)) {
+  console.log(`       Target node.exe already exists, verifying...`);
+} else if (fs.existsSync(nodeExec)) {
+  try {
+    fs.copyFileSync(nodeExec, targetNode);
+    console.log(`       Embedded node.exe from ${nodeExec}`);
+  } catch (err) {
+    console.warn(`       Note: node.exe copy skipped (${err.message})`);
+  }
 } else {
   console.warn('       Could not find node.exe to embed');
 }
